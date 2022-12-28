@@ -5,16 +5,9 @@ from dagster import asset, RetryPolicy, FreshnessPolicy, IOManager, Definitions,
 from dagster._core.storage.fs_io_manager import PickledObjectFilesystemIOManager
 from dagster._experimental.branching_io_manager import BranchingIOManager
 
-# class HackerNewsIOManager(IOManager):
-#     def load_input(self, context, input):
-#         raise NotImplementedError()
-
-#     def handle_output(self, context, md_content):
-#         load(md_content)
-
 @op
 def replicate_asset_materializations_for_group(context: OpExecutionContext) -> None:
-    assets_to_ship = ["hackernews_source_data",  "hackernews_wordcloud"]
+    assets_to_ship = ["hackernews_source_data",  "hackernews_wordcloud", "process_wordcloud"]
 
     prod_instance = DagsterInstance.from_config(file_relative_path(__file__, "prod_dagster_home/"))
 
@@ -38,7 +31,6 @@ def replicate_asset_materializations_for_group(context: OpExecutionContext) -> N
                     partition=asset_mat.partition, 
                     tags=asset_mat.tags
                 )
-            # dev_instance._event_storage.store_event(latest_event_log_entry)
         else:
             context.log.info(f"Did not find entry in catalog for {asset_key_str} in prod instance.")
 
@@ -55,13 +47,13 @@ def hackernews_source_data():
     return extract()
 
 
-@asset(
-    retry_policy=RetryPolicy(max_retries=5, delay=5),
-    freshness_policy=FreshnessPolicy(maximum_lag_minutes=30),
-    # io_manager_key="hn_io_manager",
-)
+@asset
 def hackernews_wordcloud(hackernews_source_data: pandas.DataFrame):
     return transform(hackernews_source_data)
+
+@asset
+def process_wordcloud(hackernews_wordcloud):
+    pass
 
 def is_prod():
     return os.getenv("DAGSTER_DEPLOYMENT") == "prod"
@@ -72,28 +64,32 @@ def get_branch_name():
     assert not is_prod()
     return os.getenv("DAGSTER_DEPLOYMENT", DEFAULT_BRANCH_NAME)
 
-def get_io_manager():
-    prod_io_manager = PickledObjectFilesystemIOManager(base_dir="prod_storage")
+def construct_branching_io_manager(get_prod_io_manager, get_branch_io_manager):
     if is_prod():
-        return prod_io_manager
-
-    from dagster._utils import mkdir_p
+        return get_prod_io_manager()t set
 
     branch_name = get_branch_name()
-    branch_storage_folder = f"{branch_name}_storage"
-    mkdir_p(branch_storage_folder)
- 
+
+    prod_io_manager = get_prod_io_manager()
+
     return BranchingIOManager(
         parent_io_manager=prod_io_manager,
-        branch_io_manager=PickledObjectFilesystemIOManager(base_dir=branch_storage_folder),
+        branch_io_manager=get_branch_io_manager(branch_name),
         branch_name=branch_name
     )
 
+def get_prod_io_manager():
+    return PickledObjectFilesystemIOManager(base_dir="prod_storage")
+
+def get_branch_io_manager(branch_name: str):
+    branch_storage_folder = f"{branch_name}_storage"
+    return PickledObjectFilesystemIOManager(base_dir=branch_storage_folder)
+
 
 dev_defs = Definitions(
-    assets=[hackernews_source_data, hackernews_wordcloud],
+    assets=[hackernews_source_data, hackernews_wordcloud, process_wordcloud],
     jobs=[] if is_prod() else [ship_asset_materializations],
     resources={
-        "io_manager" : get_io_manager(),
+        "io_manager": construct_branching_io_manager(get_prod_io_manager, get_branch_io_manager)
     }
 )
